@@ -1058,6 +1058,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	simple_users, categories, err := getUserSimplesAndCategoriesByItems(dbx, items)
 
 	if err != nil {
+		tx.Rollback()
 		log.Print(err)
 		if err.Error() == "seller not found" {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
@@ -1067,6 +1068,41 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
 			return
 		}
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	buyersIdSet := []int64{}
+	m := make(map[int64]bool)
+	itemIdSet := []int64{}
+
+	for _, item := range items {
+		if item.BuyerID != 0 {
+			if !m[item.BuyerID] {
+				m[item.BuyerID] = true
+				buyersIdSet = append(buyersIdSet, item.BuyerID)
+			}
+			itemIdSet = append(itemIdSet, item.ID)
+		}
+	}
+	buyers, err := getUserSimplesByIdSet(dbx, buyersIdSet)
+
+	if err != nil {
+		log.Print(err)
+		tx.Rollback()
+		if err.Error() == "seller not found" {
+			outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+			return
+		}
+		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	transactions, shippings, err := getTransactionsAndShipsByItemIdSet(dbx, itemIdSet)
+
+	if err != nil {
+		log.Print(err)
+		tx.Rollback()
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		return
 	}
@@ -1109,29 +1145,35 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if item.BuyerID != 0 {
-			buyer, err := getUserSimpleByID(tx, item.BuyerID)
-			if err != nil {
-				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
-				tx.Rollback()
-				return
-			}
+			buyer := buyers[item.BuyerID]
+
+			//buyer, err := getUserSimpleByID(tx, item.BuyerID)
+			//if err != nil {
+			//	outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+			//	tx.Rollback()
+			//	return
+			//}
 			itemDetail.BuyerID = item.BuyerID
 			itemDetail.Buyer = &buyer
 		}
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
+		transactionEvidence := transactions[item.ID]
+
+		//transactionEvidence := TransactionEvidence{}
+		//err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
+		//if err != nil && err != sql.ErrNoRows {
+		//	// It's able to ignore ErrNoRows
+		//	log.Print(err)
+		//	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		//	tx.Rollback()
+		//	return
+		//}
 
 		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+			shipping := shippings[transactionEvidence.ID]
+
+			//shipping := Shipping{}
+			//err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
 			if err == sql.ErrNoRows {
 				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
 				tx.Rollback()
@@ -2502,4 +2544,45 @@ func outputErrorMsg(w http.ResponseWriter, status int, msg string) {
 
 func getImageURL(imageName string) string {
 	return fmt.Sprintf("/upload/%s", imageName)
+}
+
+func getTransactionsAndShipsByItemIdSet(dbx *sqlx.DB, itemIdSet []int64) (map[int64]TransactionEvidence, map[int64]Shipping, error) {
+	query, params, err := sqlx.In("SELECT * FROM `transaction_evidences` WHERE `item_id` IN (?)", itemIdSet)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	transactions := []TransactionEvidence{}
+	err = dbx.Select(&transactions, query, params...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	transactionMap := make(map[int64]TransactionEvidence)
+	transactionEvidenceIds := []int64{}
+	for _, transaction := range transactions {
+		transactionMap[transaction.ItemID] = transaction
+		transactionEvidenceIds = append(transactionEvidenceIds, transaction.ID)
+	}
+
+	query, params, err = sqlx.In("SELECT * FROM `shippings` WHERE `transaction_evidence_id` IN (?)", transactionEvidenceIds)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	shippings := []Shipping{}
+	err = dbx.Select(&shippings, query, params...)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	shippingMap := make(map[int64]Shipping)
+	for _, shipping := range shippings {
+		shippingMap[shipping.TransactionEvidenceID] = shipping
+	}
+
+	return transactionMap, shippingMap, nil
 }
