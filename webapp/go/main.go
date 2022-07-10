@@ -1085,17 +1085,20 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemIdSet = append(itemIdSet, item.ID)
 		}
 	}
-	buyers, err := getUserSimplesByIdSet(dbx, buyersIdSet)
+	buyers := map[int64]UserSimple{}
+	if len(buyersIdSet) > 0 {
+		buyers, err = getUserSimplesByIdSet(dbx, buyersIdSet)
 
-	if err != nil {
-		log.Print(err)
-		tx.Rollback()
-		if err.Error() == "seller not found" {
-			outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+		if err != nil {
+			log.Print(err)
+			tx.Rollback()
+			if err.Error() == "seller not found" {
+				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
+				return
+			}
+			outputErrorMsg(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
 	}
 
 	transactions, shippings, err := getTransactionsAndShipsByItemIdSet(dbx, itemIdSet)
@@ -2547,6 +2550,9 @@ func getImageURL(imageName string) string {
 }
 
 func getTransactionsAndShipsByItemIdSet(dbx *sqlx.DB, itemIdSet []int64) (map[int64]TransactionEvidence, map[int64]Shipping, error) {
+	if len(itemIdSet) == 0 {
+		return make(map[int64]TransactionEvidence), make(map[int64]Shipping), nil
+	}
 	query, params, err := sqlx.In("SELECT * FROM `transaction_evidences` WHERE `item_id` IN (?)", itemIdSet)
 
 	if err != nil {
@@ -2564,6 +2570,10 @@ func getTransactionsAndShipsByItemIdSet(dbx *sqlx.DB, itemIdSet []int64) (map[in
 	for _, transaction := range transactions {
 		transactionMap[transaction.ItemID] = transaction
 		transactionEvidenceIds = append(transactionEvidenceIds, transaction.ID)
+	}
+
+	if len(transactionEvidenceIds) == 0 {
+		return transactionMap, make(map[int64]Shipping), nil
 	}
 
 	query, params, err = sqlx.In("SELECT * FROM `shippings` WHERE `transaction_evidence_id` IN (?)", transactionEvidenceIds)
